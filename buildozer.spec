@@ -1,48 +1,37 @@
-name: Build APK
+[app]
 
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+title = Shorties
+package.name = shorties
+package.domain = org.personal
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Descargar el código del repo
-        uses: actions/checkout@v4
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas
 
-      - name: Instalar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+version = 1.0
 
-      - name: Instalar dependencias del sistema
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+# Dependencias del proyecto. ffpyplayer permite a Kivy reproducir vídeo
+# sin necesitar ffmpeg del sistema (no disponible en Android).
+requirements = python3,kivy==2.3.0,kivymd==1.2.0,yt-dlp,certifi,requests,ffpyplayer,pyjnius,android,urllib3,websockets,mutagen
 
-      - name: Cachear buildozer
-        uses: actions/cache@v4
-        with:
-          path: |
-            .buildozer
-            ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-
+orientation = portrait
+fullscreen = 0
 
-      - name: Instalar Buildozer
-        run: |
-          pip install --upgrade pip
-          pip install buildozer "cython<3"
+icon.filename = %(source.dir)s/fab_gradient.png
 
-      - name: Compilar APK
-        run: buildozer -v android debug
+# Permisos: solo Internet, ya que guardamos los vídeos en el
+# almacenamiento privado de la app (no requiere permisos de storage).
+android.permissions = INTERNET
 
-      - name: Subir el APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: shorties-apk
-          path: bin/*.apk
+android.api = 33
+android.minapi = 24
+android.ndk = 25b
+android.accept_sdk_license = True
+android.archs = arm64-v8a
+
+# targetSdk alto + almacenamiento privado de la app evita todos los líos
+# de "scoped storage" / FileProvider de Android 10+.
+android.allow_backup = True
+
+[buildozer]
+log_level = 2
+warn_on_root = 1
