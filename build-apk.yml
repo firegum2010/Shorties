@@ -1,0 +1,38 @@
+name: Build APK
+
+# Se dispara al subir cambios a main, o manualmente desde la pestaña Actions
+# (botón "Run workflow") en GitHub, incluso desde el navegador del celular.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Descargar el código del repo
+        uses: actions/checkout@v4
+
+      - name: Cachear buildozer (acelera builds siguientes)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-
+
+      - name: Compilar APK con Buildozer
+        id: buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        with:
+          command: buildozer android debug
+          buildozer_version: stable
+
+      - name: Subir el APK como resultado descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorties-apk
+          path: ${{ steps.buildozer.outputs.filename }}
