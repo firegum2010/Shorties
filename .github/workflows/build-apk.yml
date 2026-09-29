@@ -1,7 +1,5 @@
 name: Build APK
 
-# Se dispara al subir cambios a main, o manualmente desde la pestaña Actions
-# (botón "Run workflow") en GitHub, incluso desde el navegador del celular.
 on:
   push:
     branches: [ main ]
@@ -14,7 +12,18 @@ jobs:
       - name: Descargar el código del repo
         uses: actions/checkout@v4
 
-      - name: Cachear buildozer (acelera builds siguientes)
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Instalar dependencias del sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+
+      - name: Cachear buildozer
         uses: actions/cache@v4
         with:
           path: |
@@ -24,15 +33,16 @@ jobs:
           restore-keys: |
             buildozer-
 
-      - name: Compilar APK con Buildozer
-        id: buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        with:
-          command: buildozer android debug
-          buildozer_version: stable
+      - name: Instalar Buildozer
+        run: |
+          pip install --upgrade pip
+          pip install buildozer "cython<3"
 
-      - name: Subir el APK como resultado descargable
+      - name: Compilar APK
+        run: buildozer -v android debug
+
+      - name: Subir el APK
         uses: actions/upload-artifact@v4
         with:
           name: shorties-apk
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
