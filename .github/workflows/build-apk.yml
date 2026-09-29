@@ -29,9 +29,7 @@ jobs:
           path: |
             .buildozer
             ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-
+          key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
 
       - name: Instalar Buildozer
         run: |
@@ -39,7 +37,12 @@ jobs:
           pip install buildozer "cython<3"
 
       - name: Compilar APK
-        run: buildozer -v android debug
+        shell: bash
+        run: buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Mostrar errores
+        if: failure()
+        run: grep -n -i -B3 -A6 "fatal error\|Command failed\|Could not find" build.log | tail -80
 
       - name: Subir el APK
         uses: actions/upload-artifact@v4
