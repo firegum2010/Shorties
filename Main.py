@@ -150,8 +150,8 @@ def guardar_historial(historial):
 
 def hay_internet(timeout=3):
     try:
-        socket.setdefaulttimeout(timeout)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
         s.connect(("8.8.8.8", 53))
         s.close()
         return True
@@ -289,6 +289,76 @@ def descargar_canales(canales, progreso_cb, terminado_cb):
 
 
 # ==========================================
+# CANALES: guardado en disco + backups automáticos
+# ==========================================
+MAX_BACKUPS = 10
+
+
+def cargar_canales():
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(c).strip() for c in data if str(c).strip()]
+    except Exception:
+        pass
+    return []
+
+
+def listar_backups():
+    try:
+        nombres = sorted(
+            f for f in os.listdir(BACKUPS_DIR)
+            if f.startswith("canales_") and f.endswith(".json")
+        )
+        return [os.path.join(BACKUPS_DIR, f) for f in nombres]
+    except Exception:
+        return []
+
+
+def guardar_canales(canales):
+    """Guarda la lista. Antes de sobrescribir, deja copia del estado anterior."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            sello = time.strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(CONFIG_FILE, os.path.join(BACKUPS_DIR, f"canales_{sello}.json"))
+            for viejo in listar_backups()[:-MAX_BACKUPS]:
+                try:
+                    os.remove(viejo)
+                except Exception:
+                    pass
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(canales, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+# ==========================================
+# DIÁLOGOS
+# ==========================================
+def mostrar_dialogo(titulo, texto, on_aceptar=None, texto_aceptar="Aceptar"):
+    """Mensaje simple. Si se pasa on_aceptar, muestra también 'Cancelar'."""
+    ref = {}
+
+    def cerrar(*_):
+        ref["d"].dismiss()
+
+    def aceptar(*_):
+        cerrar()
+        if on_aceptar:
+            on_aceptar()
+
+    botones = []
+    if on_aceptar:
+        botones.append(MDFlatButton(text="CANCELAR", on_release=cerrar))
+    botones.append(MDFlatButton(text=texto_aceptar.upper(), on_release=aceptar))
+    ref["d"] = MDDialog(title=titulo, text=texto, buttons=botones)
+    ref["d"].open()
+
+
+# ==========================================
 # UI - KV LANGUAGE
 # ==========================================
 KV = """
@@ -317,7 +387,7 @@ KV = """
 
 <ChannelRow@BoxLayout>:
     canal: ""
-    on_borrar: None
+    borrar_cb: None
     size_hint_y: None
     height: dp(34)
     spacing: dp(6)
@@ -337,7 +407,7 @@ KV = """
         background_color: 0.12, 0.12, 0.14, 1
         color: 0.94, 0.27, 0.27, 1
         bold: True
-        on_release: root.on_borrar() if root.on_borrar else None
+        on_release: root.borrar_cb() if root.borrar_cb else None
 
 <HomeScreen>:
     canvas.before:
@@ -589,7 +659,320 @@ class HomeScreen(Screen):
         mb_temp = obtener_tamanio_carpeta(TEMP_DIR)
         mb_perm = obtener_tamanio_carpeta(PERMANENT_DIR)
         self.texto_almacenamiento = f"Temporal: {mb_temp} MB   |   Favoritos: {mb_perm} MB"
-
     def actualizar_canales(self):
-        app = App.get_running_app()
-       
+        canales = cargar_canales()
+        rv = self.ids.rv_canales
+        rv.data = [
+            {"canal": c, "borrar_cb": partial(self.borrar_canal, c)}
+            for c in canales
+        ]
+        rv.refresh_from_data()
+
+    # ---------- canales ----------
+    def agregar_canal(self):
+        campo = self.ids.input_canal
+        texto = campo.text.strip()
+        if not texto:
+            return
+        canales = cargar_canales()
+        nueva = normalizar_url_shorts(texto).lower()
+        if any(normalizar_url_shorts(c).lower() == nueva for c in canales):
+            mostrar_dialogo("Canal repetido", "Ese canal ya está en la lista.")
+            return
+        canales.append(texto)
+        if not guardar_canales(canales):
+            mostrar_dialogo("Error", "No se pudo guardar la lista de canales.")
+            return
+        campo.text = ""
+        self.actualizar_canales()
+
+    def borrar_canal(self, canal):
+        canales = cargar_canales()
+        if canal in canales:
+            canales.remove(canal)
+            guardar_canales(canales)
+        self.actualizar_canales()
+
+    def restaurar_backup(self):
+        backups = listar_backups()
+        if not backups:
+            mostrar_dialogo("Sin backups", "Todavía no hay copias de seguridad de tus canales.")
+            return
+        ultimo = backups[-1]
+
+        def hacer():
+            try:
+                with open(ultimo, "r", encoding="utf-8") as f:
+                    canales = json.load(f)
+                if not isinstance(canales, list):
+                    raise ValueError("Formato inválido")
+                guardar_canales([str(c) for c in canales])
+                self.actualizar_canales()
+                mostrar_dialogo("Listo", f"Se restauraron {len(canales)} canal(es).")
+            except Exception as e:
+                mostrar_dialogo("Error", f"No se pudo restaurar: {e}")
+
+        mostrar_dialogo(
+            "Restaurar backup",
+            "Se volverá a la lista de canales anterior al último cambio. "
+            "La lista actual también queda guardada como backup.",
+            on_aceptar=hacer,
+            texto_aceptar="Restaurar",
+        )
+
+    # ---------- descarga ----------
+    def iniciar_descarga(self):
+        if self.descargando:
+            return
+        canales = cargar_canales()
+        if not canales:
+            mostrar_dialogo("Sin canales", "Agrega al menos un canal para poder descargar.")
+            return
+        self.descargando = True
+        self.texto_progreso = "Comprobando conexión..."
+        threading.Thread(target=self._hilo_descarga, args=(canales,), daemon=True).start()
+
+    def _hilo_descarga(self, canales):
+        # Corre en un hilo aparte: toda actualización de la UI va por Clock.
+        if not hay_internet():
+            self._terminado_seguro(False, "Sin conexión a internet. Conéctate e inténtalo de nuevo.")
+            return
+        try:
+            descargar_canales(canales, self._progreso_seguro, self._terminado_seguro)
+        except Exception as e:
+            self._terminado_seguro(False, f"Error inesperado: {e}")
+
+    def _progreso_seguro(self, mensaje):
+        Clock.schedule_once(lambda dt: setattr(self, "texto_progreso", mensaje))
+
+    def _terminado_seguro(self, ok, resumen):
+        Clock.schedule_once(lambda dt: self._fin_descarga(ok, resumen))
+
+    def _fin_descarga(self, ok, resumen):
+        self.descargando = False
+        self.texto_progreso = ""
+        self.actualizar_storage()
+        mostrar_dialogo(
+            "Descarga terminada" if ok else "Descarga con problemas",
+            resumen or "Sin novedades.",
+        )
+
+    # ---------- feeds y mantenimiento ----------
+    def abrir_feed(self, tipo):
+        carpeta = TEMP_DIR if tipo == "temp" else PERMANENT_DIR
+        if not listar_videos(carpeta):
+            mostrar_dialogo(
+                "Sin videos",
+                "No hay videos en el feed temporal. Descarga algunos primero."
+                if tipo == "temp"
+                else "Aún no has guardado favoritos. Dale doble toque a un video para guardarlo.",
+            )
+            return
+        feed = self.manager.get_screen("feed")
+        feed.cargar(tipo)
+        self.manager.transition = SlideTransition(direction="left")
+        self.manager.current = "feed"
+
+    def vaciar_temporales(self):
+        def hacer():
+            borrados = 0
+            for f in os.listdir(TEMP_DIR):
+                try:
+                    os.remove(os.path.join(TEMP_DIR, f))
+                    borrados += 1
+                except Exception:
+                    pass
+            self.actualizar_storage()
+            mostrar_dialogo("Listo", f"Se borraron {borrados} archivo(s) temporales.")
+
+        mostrar_dialogo(
+            "Vaciar temporales",
+            "Se borrarán todos los videos del feed temporal (los Favoritos no se tocan). "
+            "No se volverán a descargar.",
+            on_aceptar=hacer,
+            texto_aceptar="Vaciar",
+        )
+
+
+# ==========================================
+# PANTALLA: FEED (estilo TikTok)
+# ==========================================
+class FeedScreen(Screen):
+    texto_contador = StringProperty("")
+    texto_boton_guardar = StringProperty("Guardar")
+    guardado_ahora = BooleanProperty(False)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.fuente = "temp"
+        self.videos = []
+        self.indice = 0
+        self.video = None
+
+    # ---------- carga ----------
+    def cargar(self, tipo):
+        self.fuente = tipo
+        carpeta = TEMP_DIR if tipo == "temp" else PERMANENT_DIR
+        self.videos = listar_videos(carpeta)
+        random.shuffle(self.videos)
+        self.indice = 0
+
+    def on_pre_enter(self, *args):
+        self.mostrar_actual()
+
+    def on_leave(self, *args):
+        self._quitar_video()
+
+    def _quitar_video(self):
+        if self.video is not None:
+            try:
+                self.video.state = "stop"
+                self.video.unload()
+            except Exception:
+                pass
+            try:
+                self.ids.video_holder.remove_widget(self.video)
+            except Exception:
+                pass
+            self.video = None
+
+    def mostrar_actual(self):
+        self._quitar_video()
+        if not self.videos:
+            self.texto_contador = "0/0"
+            return
+        self.indice %= len(self.videos)
+        ruta = self.videos[self.indice]
+        self.video = Video(
+            source=ruta,
+            state="play",
+            options={"eos": "loop"},
+            fit_mode="contain",
+            size_hint=(1, 1),
+            pos_hint={"x": 0, "y": 0},
+        )
+        holder = self.ids.video_holder
+        # index alto = queda al fondo, para que los botones sigan encima
+        holder.add_widget(self.video, index=len(holder.children))
+        self.texto_contador = f"{self.indice + 1}/{len(self.videos)}"
+        self.guardado_ahora = os.path.dirname(ruta) == PERMANENT_DIR
+        self.texto_boton_guardar = "Guardado" if self.guardado_ahora else "Guardar"
+
+    # ---------- navegación ----------
+    def siguiente(self):
+        if len(self.videos) > 1:
+            self.indice = (self.indice + 1) % len(self.videos)
+            self.mostrar_actual()
+
+    def anterior(self):
+        if len(self.videos) > 1:
+            self.indice = (self.indice - 1) % len(self.videos)
+            self.mostrar_actual()
+
+    def volver(self):
+        self._quitar_video()
+        if self.manager:
+            self.manager.transition = SlideTransition(direction="right")
+            self.manager.current = "home"
+
+    # ---------- acciones ----------
+    def _alternar_pausa(self):
+        if self.video is not None:
+            self.video.state = "pause" if self.video.state == "play" else "play"
+
+    def guardar_favorito(self):
+        if not self.videos:
+            return
+        ruta = self.videos[self.indice]
+        if os.path.dirname(ruta) == PERMANENT_DIR:
+            return  # ya está en Favoritos
+        self._quitar_video()  # soltar el archivo antes de moverlo
+        try:
+            destino = os.path.join(PERMANENT_DIR, os.path.basename(ruta))
+            shutil.move(ruta, destino)
+            self.videos[self.indice] = destino
+        except Exception as e:
+            mostrar_dialogo("No se pudo guardar", str(e))
+        # se vuelve a cargar el mismo video (ya desde Favoritos, botón en verde)
+        self.mostrar_actual()
+
+    def eliminar_actual(self):
+        if not self.videos:
+            return
+        ruta = self.videos[self.indice]
+        self._quitar_video()
+        try:
+            os.remove(ruta)
+        except Exception as e:
+            mostrar_dialogo("No se pudo eliminar", str(e))
+            self.mostrar_actual()
+            return
+        self.videos.pop(self.indice)
+        if not self.videos:
+            self.volver()
+            mostrar_dialogo("Sin videos", "Ya no quedan videos en este feed.")
+            return
+        self.mostrar_actual()  # mismo índice = el video que seguía
+
+    # ---------- gestos ----------
+    def on_touch_down(self, touch):
+        if super().on_touch_down(touch):
+            return True  # lo atendió un botón
+        touch.ud["feed_inicio"] = (touch.x, touch.y)
+        return True
+
+    def on_touch_up(self, touch):
+        inicio = touch.ud.get("feed_inicio")
+        if inicio is None:
+            return super().on_touch_up(touch)
+        dx = touch.x - inicio[0]
+        dy = touch.y - inicio[1]
+        if abs(dy) > dp(60) and abs(dy) > abs(dx):
+            # deslizar hacia arriba = siguiente, hacia abajo = anterior
+            if dy > 0:
+                self.siguiente()
+            else:
+                self.anterior()
+        elif abs(dx) < dp(15) and abs(dy) < dp(15):
+            # un toque alterna pausa; el doble toque guarda (y deshace la pausa
+            # que provocó el primer toque)
+            self._alternar_pausa()
+            if touch.is_double_tap:
+                self.guardar_favorito()
+        return True
+
+
+# ==========================================
+# APP
+# ==========================================
+class ShortiesApp(MDApp):
+    fab_image = StringProperty(FAB_IMAGE)
+
+    def build(self):
+        self.title = "Shorties"
+        self.theme_cls.theme_style = "Dark"
+        Window.clearcolor = (0, 0, 0, 1)
+        Builder.load_string(KV)
+        sm = ScreenManager(transition=SlideTransition())
+        sm.add_widget(HomeScreen(name="home"))
+        sm.add_widget(FeedScreen(name="feed"))
+        Window.bind(on_keyboard=self.on_tecla)
+        return sm
+
+    def on_tecla(self, window, key, *args):
+        # 27 = Esc / botón "atrás" de Android
+        if key == 27 and self.root.current == "feed":
+            self.root.get_screen("feed").volver()
+            return True
+        return False
+
+    def on_pause(self):
+        # Sin esto, Android cierra la app al salir a otra app
+        return True
+
+    def on_resume(self):
+        pass
+
+
+if __name__ == "__main__":
+    ShortiesApp().run()
