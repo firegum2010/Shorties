@@ -27,6 +27,7 @@ android.minapi = 24
 android.ndk = 25b
 android.accept_sdk_license = True
 android.archs = arm64-v8a
+p4a.branch = v2024.01.21
 
 # targetSdk alto + almacenamiento privado de la app evita todos los líos
 # de "scoped storage" / FileProvider de Android 10+.
